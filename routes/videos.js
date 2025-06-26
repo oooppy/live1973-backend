@@ -58,23 +58,30 @@ router.get('/', async (req, res) => {
       isRealVideo: true
     }));
 
-    res.json({
-      success: true,
-      data: {
-        videos: formattedVideos,
-        pagination: {
-          current_page: parseInt(page),
-          per_page: parseInt(limit),
-          total: countResult.total,
-          total_pages: Math.ceil(countResult.total / limit)
-        }
-      }
-    });
+    // res.json({
+    //   success: true,
+    //   data: {
+    //     videos: formattedVideos,
+    //     pagination: {
+    //       current_page: parseInt(page),
+    //       per_page: parseInt(limit),
+    //       total: countResult.total,
+    //       total_pages: Math.ceil(countResult.total / limit)
+    //     }
+    //   }
+    // });
+
+    res.json(formattedVideos);
 
   } catch (error) {
     console.error('获取视频列表错误:', error);
+
+    // res.status(500).json({
+    //   success: false,
+    //   error: '获取视频列表失败',
+    //   message: error.message
+    // });
     res.status(500).json({
-      success: false,
       error: '获取视频列表失败',
       message: error.message
     });
