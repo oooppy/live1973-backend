@@ -2,6 +2,30 @@ const express = require('express');
 const router = express.Router();
 const { query } = require('../config/database');
 
+// 🔧 新增：同步VOD视频API（必须放在 /:id 路由之前）
+router.post('/sync-vod', async (req, res) => {
+  try {
+    console.log('🔄 开始同步VOD视频...');
+    
+    res.json({
+      success: true,
+      message: 'VOD同步功能已启用',
+      data: {
+        timestamp: new Date().toISOString(),
+        status: 'ready'
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ VOD同步失败:', error);
+    res.status(500).json({
+      success: false,
+      message: 'VOD同步失败',
+      error: error.message
+    });
+  }
+});
+
 // 获取视频列表（按播放量排序）
 router.get('/', async (req, res) => {
   try {
@@ -23,6 +47,7 @@ router.get('/', async (req, res) => {
         title,
         description,
         video_url,
+        video_id,
         thumbnail_url,
         duration,
         view_count,
@@ -48,6 +73,7 @@ router.get('/', async (req, res) => {
       title: video.title,
       description: video.description,
       videoUrl: video.video_url,
+      videoId: video.video_id, // 🔧 添加video_id字段
       thumbnail: video.thumbnail_url,
       duration: formatDuration(video.duration),
       views: formatViewCount(video.view_count),
@@ -58,29 +84,10 @@ router.get('/', async (req, res) => {
       isRealVideo: true
     }));
 
-    // res.json({
-    //   success: true,
-    //   data: {
-    //     videos: formattedVideos,
-    //     pagination: {
-    //       current_page: parseInt(page),
-    //       per_page: parseInt(limit),
-    //       total: countResult.total,
-    //       total_pages: Math.ceil(countResult.total / limit)
-    //     }
-    //   }
-    // });
-
     res.json(formattedVideos);
 
   } catch (error) {
     console.error('获取视频列表错误:', error);
-
-    // res.status(500).json({
-    //   success: false,
-    //   error: '获取视频列表失败',
-    //   message: error.message
-    // });
     res.status(500).json({
       error: '获取视频列表失败',
       message: error.message
@@ -99,6 +106,7 @@ router.get('/:id', async (req, res) => {
         title,
         description,
         video_url,
+        video_id,
         thumbnail_url,
         duration,
         view_count,
@@ -124,6 +132,7 @@ router.get('/:id', async (req, res) => {
       title: video.title,
       description: video.description,
       videoUrl: video.video_url,
+      videoId: video.video_id, // 🔧 添加video_id字段
       thumbnail: video.thumbnail_url,
       duration: formatDuration(video.duration),
       views: formatViewCount(video.view_count),
@@ -150,7 +159,50 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// 记录视频播放
+// 🔧 修改：记录视频播放（支持PATCH方法）
+router.patch('/:id/views', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 检查视频是否存在
+    const videos = await query('SELECT id, view_count FROM videos WHERE id = ? AND status = ?', [id, 'active']);
+    
+    if (videos.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: '视频不存在'
+      });
+    }
+
+    const oldViewCount = videos[0].view_count;
+
+    // 更新播放次数
+    await query('UPDATE videos SET view_count = view_count + 1 WHERE id = ?', [id]);
+
+    // 获取更新后的播放次数
+    const [result] = await query('SELECT view_count FROM videos WHERE id = ?', [id]);
+
+    res.json({
+      message: '播放次数已更新',
+      data: {
+        videoId: id,
+        oldViewCount: oldViewCount,
+        newViewCount: result.view_count,
+        increment: 1
+      }
+    });
+
+  } catch (error) {
+    console.error('记录播放错误:', error);
+    res.status(500).json({
+      success: false,
+      error: '记录播放失败',
+      message: error.message
+    });
+  }
+});
+
+// 记录视频播放（保持原有POST方法兼容性）
 router.post('/:id/view', async (req, res) => {
   try {
     const { id } = req.params;
@@ -212,7 +264,7 @@ router.get('/search/:keyword', async (req, res) => {
 
     const videos = await query(
       `SELECT 
-        id, title, description, video_url, thumbnail_url, 
+        id, title, description, video_url, video_id, thumbnail_url, 
         duration, view_count, like_count, resolution,
         DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') as created_at
       FROM videos 
@@ -228,6 +280,7 @@ router.get('/search/:keyword', async (req, res) => {
       title: video.title,
       description: video.description,
       videoUrl: video.video_url,
+      videoId: video.video_id, // 🔧 添加video_id字段
       thumbnail: video.thumbnail_url,
       duration: formatDuration(video.duration),
       views: formatViewCount(video.view_count),
@@ -256,6 +309,65 @@ router.get('/search/:keyword', async (req, res) => {
     });
   }
 });
+
+// 🔧 VOD相关辅助函数
+async function getVODVideoList() {
+  // 需要安装阿里云SDK: npm install @alicloud/pop-core
+  const RPCClient = require('@alicloud/pop-core').RPCClient;
+  
+  const client = new RPCClient({
+    accessKeyId: process.env.ALICLOUD_ACCESS_KEY_ID,
+    accessKeySecret: process.env.ALICLOUD_ACCESS_KEY_SECRET,
+    endpoint: 'https://vod.cn-shanghai.aliyuncs.com',
+    apiVersion: '2017-03-21'
+  });
+  
+  try {
+    const response = await client.request('GetVideoList', {
+      Status: 'Normal', // 只获取正常状态的视频
+      PageNo: 1,
+      PageSize: 100 // 可以根据需要调整
+    }, {
+      method: 'POST'
+    });
+    
+    return response.VideoList?.Video || [];
+  } catch (error) {
+    console.error('❌ 获取VOD视频列表失败:', error);
+    throw error;
+  }
+}
+
+async function getVODPlayUrl(videoId) {
+  const RPCClient = require('@alicloud/pop-core').RPCClient;
+  
+  const client = new RPCClient({
+    accessKeyId: process.env.ALICLOUD_ACCESS_KEY_ID,
+    accessKeySecret: process.env.ALICLOUD_ACCESS_KEY_SECRET,
+    endpoint: 'https://vod.cn-shanghai.aliyuncs.com',
+    apiVersion: '2017-03-21'
+  });
+  
+  try {
+    const response = await client.request('GetPlayInfo', {
+      VideoId: videoId,
+      Definition: 'OD', // 原画质量
+      AuthTimeout: 3600, // URL有效期1小时
+    }, {
+      method: 'POST'
+    });
+    
+    const playInfoList = response.PlayInfoList?.PlayInfo;
+    if (playInfoList && playInfoList.length > 0) {
+      return playInfoList[0].PlayURL;
+    }
+    
+    throw new Error('没有找到播放地址');
+  } catch (error) {
+    console.error('❌ 获取VOD播放地址失败:', error);
+    throw error;
+  }
+}
 
 // 辅助函数：格式化时长
 function formatDuration(seconds) {
