@@ -3,10 +3,18 @@ const mysql = require('mysql2/promise');
 const cors = require('cors');
 const path = require('path');
 const vodService = require('./services/aliyunVod');
+const https = require('https');
+const http = require('http');
+const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const HTTP_PORT = process.env.PORT || 3000;
+const HTTPS_PORT = process.env.HTTPS_PORT || 3443;
+
+// 🆕 检测运行环境
+const isProduction = process.env.NODE_ENV === 'production';
+const enableDirectHTTPS = process.env.ENABLE_DIRECT_HTTPS === 'true';
 
 // 简单的环境变量检查
 function checkEnvVars() {
@@ -21,14 +29,39 @@ function checkEnvVars() {
   }
 }
 
-// 检查环境变量
 checkEnvVars();
 
-// 中间件
-app.use(cors());
+app.use((req, res, next) => {
+  // 清除可能存在的 CORS 头（防止重复）
+  res.removeHeader('Access-Control-Allow-Origin');
+  
+  // 设置 CORS 头
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin, X-Requested-With');
+  
+  // 预检请求处理
+  if (req.method === 'OPTIONS') {
+    console.log(`🔧 处理 OPTIONS 预检请求: ${req.url}`);
+    return res.sendStatus(200);
+  }
+  
+  next();
+});
+
+// // 🔧 增强的 CORS 配置，支持 Nginx 反向代理
+// app.use(cors({
+//   origin: '*',
+//   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+//   allowedHeaders: ['Content-Type', 'Authorization', 'X-Forwarded-For', 'X-Forwarded-Proto']
+// }));
+
 app.use(express.json());
 
-// 添加静态文件服务 - 用于本地视频测试
+// 🆕 信任代理设置（支持 Nginx）
+app.set('trust proxy', true);
+
+// 添加静态文件服务
 app.use('/videos', express.static(path.join(__dirname, 'videos')));
 
 // 数据库连接配置
@@ -43,10 +76,8 @@ const dbConfig = {
   queueLimit: 0
 };
 
-// 创建数据库连接池
 const pool = mysql.createPool(dbConfig);
 
-// 测试数据库连接
 async function testDbConnection() {
   try {
     const connection = await pool.getConnection();
@@ -57,13 +88,20 @@ async function testDbConnection() {
   }
 }
 
-// 健康检查接口
+// 🆕 增强的健康检查接口
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     message: 'Live1973 API is running',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
+    protocol: req.protocol,
+    host: req.get('host'),
+    // 🆕 代理信息（用于调试 Nginx 配置）
+    forwardedProto: req.get('X-Forwarded-Proto'),
+    forwardedFor: req.get('X-Forwarded-For'),
+    realIP: req.ip,
+    isSecure: req.secure || req.get('X-Forwarded-Proto') === 'https'
   });
 });
 
@@ -114,7 +152,6 @@ app.post('/api/videos', async (req, res) => {
       aliyun_video_id = ''
     } = req.body;
 
-    // 验证必需字段
     if (!title || !videoUrl) {
       return res.status(400).json({ 
         error: '标题和视频URL是必需的' 
@@ -127,7 +164,6 @@ app.post('/api/videos', async (req, res) => {
       [title, videoUrl, thumbnail_url, duration, view_count, status, description, aliyun_video_id]
     );
 
-    // 返回创建的视频信息
     const [newVideo] = await pool.execute(
       'SELECT * FROM videos WHERE id = ?',
       [result.insertId]
@@ -144,9 +180,9 @@ app.post('/api/videos', async (req, res) => {
 app.patch('/api/videos/:id/views', async (req, res) => {
   try {
     const videoId = req.params.id;
-    console.log(`🎬 收到播放数更新请求 - 视频ID: ${videoId}`);
+    const clientProtocol = req.secure || req.get('X-Forwarded-Proto') === 'https' ? 'HTTPS' : 'HTTP';
+    console.log(`🎬 收到播放数更新请求 - 视频ID: ${videoId} (${clientProtocol})`);
     
-    // 先查询当前播放数
     const [currentRows] = await pool.execute(
       'SELECT id, title, view_count FROM videos WHERE id = ?',
       [videoId]
@@ -160,23 +196,16 @@ app.patch('/api/videos/:id/views', async (req, res) => {
     const currentVideo = currentRows[0];
     console.log(`📊 当前播放数: ${currentVideo.view_count} (${currentVideo.title})`);
     
-    // 更新播放数
     const [updateResult] = await pool.execute(
       'UPDATE videos SET view_count = view_count + 1, updated_at = NOW() WHERE id = ?',
       [videoId]
     );
-    
-    console.log(`📝 更新结果:`, {
-      affectedRows: updateResult.affectedRows,
-      changedRows: updateResult.changedRows
-    });
     
     if (updateResult.affectedRows === 0) {
       console.log(`⚠️  没有行被更新`);
       return res.status(500).json({ error: '更新失败，没有行被影响' });
     }
     
-    // 查询更新后的播放数
     const [newRows] = await pool.execute(
       'SELECT view_count FROM videos WHERE id = ?',
       [videoId]
@@ -203,7 +232,7 @@ app.patch('/api/videos/:id/views', async (req, res) => {
   }
 });
 
-// 🔧 新增：获取单个视频的播放数（用于调试）
+// 获取单个视频的播放数
 app.get('/api/videos/:id/views', async (req, res) => {
   try {
     const videoId = req.params.id;
@@ -236,13 +265,12 @@ app.get('/api/videos/:id/views', async (req, res) => {
   }
 });
 
-// 🔧 新增：测试播放数增加的接口
+// 测试播放数增加的接口
 app.post('/api/test/views/:id', async (req, res) => {
   try {
     const videoId = req.params.id;
     console.log(`🧪 测试播放数增加 - 视频ID: ${videoId}`);
     
-    // 查询当前播放数
     const [beforeRows] = await pool.execute(
       'SELECT view_count FROM videos WHERE id = ?',
       [videoId]
@@ -254,13 +282,11 @@ app.post('/api/test/views/:id', async (req, res) => {
     
     const beforeCount = beforeRows[0].view_count;
     
-    // 增加播放数
     await pool.execute(
       'UPDATE videos SET view_count = view_count + 1 WHERE id = ?',
       [videoId]
     );
     
-    // 查询更新后的播放数
     const [afterRows] = await pool.execute(
       'SELECT view_count FROM videos WHERE id = ?',
       [videoId]
@@ -286,13 +312,13 @@ app.post('/api/test/views/:id', async (req, res) => {
   }
 });
 
-// 🔧 新的VOD播放地址获取接口（使用VOD SDK）
+// VOD播放地址获取接口
 app.get('/api/videos/:id/play', async (req, res) => {
   try {
     const videoId = req.params.id;
-    console.log(`🎬 请求播放视频: ${videoId}`);
+    const clientProtocol = req.secure || req.get('X-Forwarded-Proto') === 'https' ? 'HTTPS' : 'HTTP';
+    console.log(`🎬 请求播放视频: ${videoId} (${clientProtocol})`);
     
-    // 从数据库获取视频信息
     const [rows] = await pool.execute(
       'SELECT * FROM videos WHERE id = ? AND status = ?',
       [videoId, 'active']
@@ -304,14 +330,12 @@ app.get('/api/videos/:id/play', async (req, res) => {
     
     const video = rows[0];
     
-    // 如果是VOD视频，使用SDK获取播放地址
     if (video.aliyun_video_id) {
       console.log(`🎯 VOD视频，使用SDK获取播放地址: ${video.aliyun_video_id}`);
       
       const result = await vodService.getPlayUrl(video.aliyun_video_id);
       
       if (result.success) {
-        // 可选：更新数据库中的缓存URL
         try {
           await pool.execute(
             'UPDATE videos SET video_url = ?, updated_at = NOW() WHERE id = ?',
@@ -340,7 +364,6 @@ app.get('/api/videos/:id/play', async (req, res) => {
         });
       }
     } else if (video.video_url) {
-      // 普通视频，直接返回URL
       console.log(`▶️  普通视频，直接播放: ${video.video_url}`);
       return res.json({
         success: true,
@@ -363,7 +386,7 @@ app.get('/api/videos/:id/play', async (req, res) => {
   }
 });
 
-// VOD连接测试接口
+// VOD相关接口保持不变...
 app.get('/api/vod/test', async (req, res) => {
   try {
     const result = await vodService.testConnection();
@@ -373,7 +396,6 @@ app.get('/api/vod/test', async (req, res) => {
   }
 });
 
-// VOD视频信息获取接口
 app.get('/api/vod/info/:videoId', async (req, res) => {
   try {
     const result = await vodService.getVideoInfo(req.params.videoId);
@@ -383,16 +405,11 @@ app.get('/api/vod/info/:videoId', async (req, res) => {
   }
 });
 
-// 在你的 server.js 中，在现有的视频接口之后添加以下代码：
-
-// 在你的 server.js 中，替换之前的测试版同步接口：
-
-// 🔧 完整版：同步VOD视频接口
+// VOD同步接口（保持原有逻辑）...
 app.post('/api/videos/sync-vod', async (req, res) => {
   try {
     console.log('🔄 开始同步VOD视频...');
     
-    // 1. 检查VOD服务是否可用
     const vodTest = await vodService.testConnection();
     if (!vodTest.success) {
       return res.status(500).json({
@@ -404,7 +421,6 @@ app.post('/api/videos/sync-vod', async (req, res) => {
     
     console.log('✅ VOD连接正常');
     
-    // 2. 获取VOD中的所有视频
     const vodVideos = await getVODVideoList();
     console.log(`📊 VOD中找到 ${vodVideos.length} 个视频`);
     
@@ -420,21 +436,18 @@ app.post('/api/videos/sync-vod', async (req, res) => {
       });
     }
     
-    // 3. 获取数据库中现有的视频
     const [existingVideos] = await pool.execute(
       'SELECT aliyun_video_id FROM videos WHERE aliyun_video_id IS NOT NULL AND aliyun_video_id != ""'
     );
     const existingVideoIds = existingVideos.map(v => v.aliyun_video_id);
     console.log(`💾 数据库中已有 ${existingVideoIds.length} 个VOD视频`);
     
-    // 4. 找出需要添加的新视频
     const newVideos = vodVideos.filter(vodVideo => 
       !existingVideoIds.includes(vodVideo.VideoId)
     );
     
     console.log(`🆕 发现 ${newVideos.length} 个新视频需要同步`);
     
-    // 5. 批量添加新视频到数据库
     const syncResults = [];
     let successCount = 0;
     
@@ -459,11 +472,11 @@ app.post('/api/videos/sync-vod', async (req, res) => {
             vodVideo.Title || '未命名视频',
             vodVideo.Description || '',
             vodVideo.VideoId,
-            formatDurationFromSeconds(vodVideo.Duration), // 转换为 MM:SS 格式
+            formatDurationFromSeconds(vodVideo.Duration),
             vodVideo.CoverURL || '',
-            '', // video_url 先留空，播放时动态获取
+            '',
             'active',
-            0 // 初始播放数
+            0
           ]
         );
         
@@ -513,12 +526,10 @@ app.post('/api/videos/sync-vod', async (req, res) => {
   }
 });
 
-// 🔧 获取VOD视频列表的辅助函数
 async function getVODVideoList() {
   try {
     console.log('📋 调用 vodService.getAllVideos()...');
     
-    // 使用新添加的 getAllVideos 方法
     const result = await vodService.getAllVideos();
     
     if (result.success) {
@@ -535,7 +546,6 @@ async function getVODVideoList() {
   }
 }
 
-// 🔧 时长格式转换辅助函数
 function formatDurationFromSeconds(seconds) {
   if (!seconds || seconds === 0) return '0:00';
   
@@ -551,9 +561,6 @@ function formatDurationFromSeconds(seconds) {
   }
 }
 
-// 🗑️ 删除旧的临时接口（不再需要）
-// app.get('/api/vod/:videoId/playurl', ...) - 已删除
-
 // 错误处理中间件
 app.use((err, req, res, next) => {
   console.error(err.stack);
@@ -565,17 +572,79 @@ app.use('*', (req, res) => {
   res.status(404).json({ error: '接口不存在' });
 });
 
-// 启动服务器
-app.listen(PORT, async () => {
-  console.log(`🚀 Live1973 API 服务器运行在端口 ${PORT}`);
-  console.log(`📱 健康检查: http://localhost:${PORT}/api/health`);
-  console.log(`🎬 视频接口: http://localhost:${PORT}/api/videos`);
-  console.log(`📁 本地视频: http://localhost:${PORT}/videos/`);
+// 🆕 智能的证书检测（仅在启用直接HTTPS时使用）
+function createHTTPSOptions() {
+  if (!enableDirectHTTPS) {
+    console.log('🔧 直接 HTTPS 已禁用，推荐使用 Nginx 反向代理');
+    return null;
+  }
+
+  try {
+    const possiblePaths = [
+      {
+        key: '/etc/ssl/private/selfsigned.key',
+        cert: '/etc/ssl/certs/selfsigned.crt',
+        env: 'production'
+      },
+      {
+        key: path.join(__dirname, 'ssl', 'selfsigned.key'),
+        cert: path.join(__dirname, 'ssl', 'selfsigned.crt'),
+        env: 'local'
+      }
+    ];
+
+    for (const pathConfig of possiblePaths) {
+      if (fs.existsSync(pathConfig.key) && fs.existsSync(pathConfig.cert)) {
+        console.log(`📋 找到 SSL 证书文件 (${pathConfig.env})`);
+        return {
+          key: fs.readFileSync(pathConfig.key),
+          cert: fs.readFileSync(pathConfig.cert)
+        };
+      }
+    }
+    
+    console.log('⚠️  未找到 SSL 证书文件');
+    return null;
+    
+  } catch (error) {
+    console.error('❌ 读取 SSL 证书失败:', error.message);
+    return null;
+  }
+}
+
+// 🆕 启动服务器函数
+async function startServers() {
+  console.log(`🚀 启动模式: ${isProduction ? '生产环境' : '开发环境'}`);
+  console.log(`🔧 推荐架构: Node.js (HTTP:${HTTP_PORT}) + Nginx 反向代理 (HTTPS:443)`);
   
+  // 启动 HTTP 服务器（主要服务）
+  const httpServer = http.createServer(app);
+  httpServer.listen(HTTP_PORT, () => {
+    console.log(`🚀 HTTP 服务器运行在端口 ${HTTP_PORT}`);
+    console.log(`📱 健康检查: http://localhost:${HTTP_PORT}/api/health`);
+    console.log(`🎬 视频接口: http://localhost:${HTTP_PORT}/api/videos`);
+  });
+
+  // 可选：启动直接 HTTPS 服务器（用于测试）
+  if (enableDirectHTTPS) {
+    const httpsOptions = createHTTPSOptions();
+    if (httpsOptions) {
+      try {
+        const httpsServer = https.createServer(httpsOptions, app);
+        httpsServer.listen(HTTPS_PORT, () => {
+          console.log(`🔒 HTTPS 服务器运行在端口 ${HTTPS_PORT} (测试用)`);
+          console.log(`🔐 HTTPS 健康检查: https://localhost:${HTTPS_PORT}/api/health`);
+        });
+      } catch (error) {
+        console.error('❌ HTTPS 服务器启动失败:', error.message);
+      }
+    }
+  }
+
   // 测试数据库连接
   await testDbConnection();
   
-  // 🔧 测试VOD连接
+  // 测试VOD连接
   console.log('🔧 测试VOD SDK连接...');
   try {
     const vodResult = await vodService.testConnection();
@@ -587,4 +656,7 @@ app.listen(PORT, async () => {
   } catch (error) {
     console.log('❌ VOD SDK测试出错:', error.message);
   }
-});
+}
+
+// 启动应用
+startServers();
