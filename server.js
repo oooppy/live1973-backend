@@ -31,31 +31,6 @@ function checkEnvVars() {
 
 checkEnvVars();
 
-// app.use((req, res, next) => {
-//   // 清除可能存在的 CORS 头（防止重复）
-//   res.removeHeader('Access-Control-Allow-Origin');
-  
-//   // 设置 CORS 头
-//   res.header('Access-Control-Allow-Origin', '*');
-//   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-//   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin, X-Requested-With');
-  
-//   // 预检请求处理
-//   if (req.method === 'OPTIONS') {
-//     console.log(`🔧 处理 OPTIONS 预检请求: ${req.url}`);
-//     return res.sendStatus(200);
-//   }
-  
-//   next();
-// });
-
-// // 🔧 增强的 CORS 配置，支持 Nginx 反向代理
-// app.use(cors({
-//   origin: '*',
-//   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-//   allowedHeaders: ['Content-Type', 'Authorization', 'X-Forwarded-For', 'X-Forwarded-Proto']
-// }));
-
 app.use(express.json());
 
 // 🆕 信任代理设置（支持 Nginx）
@@ -63,6 +38,9 @@ app.set('trust proxy', true);
 
 // 添加静态文件服务
 app.use('/videos', express.static(path.join(__dirname, 'videos')));
+
+// 🆕 Flutter Web 静态文件服务
+app.use('/', express.static(path.join(__dirname, 'public')));
 
 // 数据库连接配置
 const dbConfig = {
@@ -567,11 +545,23 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: '服务器内部错误' });
 });
 
+// OPTIONS 请求处理（CORS 预检请求）
 app.options('*', (req, res) => {
-   res.sendStatus(200);
+  res.sendStatus(200);
 });
 
-// 404处理
+// 🆕 SPA 路由支持（单页应用路由处理）
+app.get('*', (req, res) => {
+  // 如果是 API 请求，返回 404
+  if (req.url.startsWith('/api')) {
+    return res.status(404).json({ error: '接口不存在' });
+  }
+  
+  // 非 API 请求，返回 Flutter Web 应用的 index.html
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// 其他请求的 404 处理（主要处理非 GET 请求）
 app.use('*', (req, res) => {
   res.status(404).json({ error: '接口不存在' });
 });
@@ -627,6 +617,7 @@ async function startServers() {
     console.log(`🚀 HTTP 服务器运行在端口 ${HTTP_PORT}`);
     console.log(`📱 健康检查: http://localhost:${HTTP_PORT}/api/health`);
     console.log(`🎬 视频接口: http://localhost:${HTTP_PORT}/api/videos`);
+    console.log(`🌐 前端应用: http://localhost:${HTTP_PORT}/`);
   });
 
   // 可选：启动直接 HTTPS 服务器（用于测试）
