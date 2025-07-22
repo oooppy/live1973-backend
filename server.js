@@ -31,23 +31,23 @@ function checkEnvVars() {
 
 checkEnvVars();
 
-app.use((req, res, next) => {
-  // 清除可能存在的 CORS 头（防止重复）
-  res.removeHeader('Access-Control-Allow-Origin');
+// app.use((req, res, next) => {
+//   // 清除可能存在的 CORS 头（防止重复）
+//   res.removeHeader('Access-Control-Allow-Origin');
   
-  // 设置 CORS 头
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin, X-Requested-With');
+//   // 设置 CORS 头
+//   res.header('Access-Control-Allow-Origin', '*');
+//   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+//   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin, X-Requested-With');
   
-  // 预检请求处理
-  if (req.method === 'OPTIONS') {
-    console.log(`🔧 处理 OPTIONS 预检请求: ${req.url}`);
-    return res.sendStatus(200);
-  }
+//   // 预检请求处理
+//   if (req.method === 'OPTIONS') {
+//     console.log(`🔧 处理 OPTIONS 预检请求: ${req.url}`);
+//     return res.sendStatus(200);
+//   }
   
-  next();
-});
+//   next();
+// });
 
 // // 🔧 增强的 CORS 配置，支持 Nginx 反向代理
 // app.use(cors({
