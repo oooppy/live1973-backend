@@ -33,6 +33,15 @@ checkEnvVars();
 
 app.use(express.json());
 
+// 根据环境区分CORS配置
+if (!isProduction) {
+  // 开发环境：允许所有来源跨域，便于本地调试
+  app.use(cors({
+    origin: true,
+    credentials: true
+  }));
+} 
+
 // 🆕 信任代理设置（支持 Nginx）
 app.set('trust proxy', true);
 
@@ -387,7 +396,6 @@ app.get('/api/vod/info/:videoId', async (req, res) => {
 app.post('/api/videos/sync-vod', async (req, res) => {
   try {
     console.log('🔄 开始同步VOD视频...');
-    
     const vodTest = await vodService.testConnection();
     if (!vodTest.success) {
       return res.status(500).json({
@@ -396,55 +404,30 @@ app.post('/api/videos/sync-vod', async (req, res) => {
         error: vodTest.error
       });
     }
-    
     console.log('✅ VOD连接正常');
-    
     const vodVideos = await getVODVideoList();
     console.log(`📊 VOD中找到 ${vodVideos.length} 个视频`);
-    
-    if (vodVideos.length === 0) {
-      return res.json({
-        success: true,
-        message: 'VOD中没有视频需要同步',
-        data: {
-          totalVodVideos: 0,
-          newVideosAdded: 0,
-          syncResults: []
-        }
-      });
-    }
-    
+    // 1. 获取数据库所有视频ID
     const [existingVideos] = await pool.execute(
-      'SELECT aliyun_video_id FROM videos WHERE aliyun_video_id IS NOT NULL AND aliyun_video_id != ""'
+      'SELECT id, aliyun_video_id FROM videos WHERE aliyun_video_id IS NOT NULL AND aliyun_video_id != ""'
     );
     const existingVideoIds = existingVideos.map(v => v.aliyun_video_id);
-    console.log(`💾 数据库中已有 ${existingVideoIds.length} 个VOD视频`);
-    
-    const newVideos = vodVideos.filter(vodVideo => 
-      !existingVideoIds.includes(vodVideo.VideoId)
-    );
-    
-    console.log(`🆕 发现 ${newVideos.length} 个新视频需要同步`);
-    
-    const syncResults = [];
+    // 2. 获取VOD所有视频ID
+    const vodVideoIds = vodVideos.map(v => v.VideoId);
+    // 3. 找出需要新增的视频
+    const newVideos = vodVideos.filter(vodVideo => !existingVideoIds.includes(vodVideo.VideoId));
+    // 4. 找出需要删除的视频
+    const toDelete = existingVideos.filter(dbVideo => !vodVideoIds.includes(dbVideo.aliyun_video_id));
+    // 5. 批量插入新增视频
     let successCount = 0;
-    
+    let updateCount = 0;
+    let deleteCount = 0;
+    const syncResults = [];
     for (const vodVideo of newVideos) {
       try {
-        console.log(`📥 正在同步: ${vodVideo.Title}`);
-        
         const [result] = await pool.execute(
           `INSERT INTO videos (
-            title, 
-            description, 
-            aliyun_video_id, 
-            duration, 
-            thumbnail_url, 
-            video_url,
-            status,
-            view_count,
-            created_at,
-            updated_at
+            title, description, aliyun_video_id, duration, thumbnail_url, video_url, status, view_count, created_at, updated_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
           [
             vodVideo.Title || '未命名视频',
@@ -457,43 +440,83 @@ app.post('/api/videos/sync-vod', async (req, res) => {
             0
           ]
         );
-        
         syncResults.push({
           databaseId: result.insertId,
           videoId: vodVideo.VideoId,
           title: vodVideo.Title,
-          duration: vodVideo.Duration,
-          status: 'success'
+          status: 'inserted'
         });
-        
         successCount++;
-        console.log(`✅ 同步成功: ${vodVideo.Title} (ID: ${result.insertId})`);
-        
       } catch (error) {
-        console.error(`❌ 同步失败: ${vodVideo.Title}`, error);
         syncResults.push({
           videoId: vodVideo.VideoId,
           title: vodVideo.Title,
-          status: 'error',
+          status: 'insert_error',
           error: error.message
         });
       }
     }
-    
-    console.log(`🎉 同步完成! 成功: ${successCount}, 失败: ${newVideos.length - successCount}`);
-    
+    // 6. 批量删除多余视频
+    for (const dbVideo of toDelete) {
+      try {
+        await pool.execute('DELETE FROM videos WHERE id = ?', [dbVideo.id]);
+        syncResults.push({
+          databaseId: dbVideo.id,
+          videoId: dbVideo.aliyun_video_id,
+          status: 'deleted'
+        });
+        deleteCount++;
+      } catch (error) {
+        syncResults.push({
+          databaseId: dbVideo.id,
+          videoId: dbVideo.aliyun_video_id,
+          status: 'delete_error',
+          error: error.message
+        });
+      }
+    }
+    // 7. 可选：同步更新已有视频的标题、描述等（如有需要）
+    for (const vodVideo of vodVideos) {
+      const dbVideo = existingVideos.find(v => v.aliyun_video_id === vodVideo.VideoId);
+      if (dbVideo) {
+        try {
+          await pool.execute(
+            'UPDATE videos SET title = ?, description = ?, duration = ?, thumbnail_url = ?, updated_at = NOW() WHERE id = ?',
+            [
+              vodVideo.Title || '未命名视频',
+              vodVideo.Description || '',
+              formatDurationFromSeconds(vodVideo.Duration),
+              vodVideo.CoverURL || '',
+              dbVideo.id
+            ]
+          );
+          syncResults.push({
+            databaseId: dbVideo.id,
+            videoId: vodVideo.VideoId,
+            status: 'updated'
+          });
+          updateCount++;
+        } catch (error) {
+          syncResults.push({
+            databaseId: dbVideo.id,
+            videoId: vodVideo.VideoId,
+            status: 'update_error',
+            error: error.message
+          });
+        }
+      }
+    }
     res.json({
       success: true,
-      message: `同步完成! 新增 ${successCount} 个视频`,
+      message: `同步完成! 新增 ${successCount} 个，删除 ${deleteCount} 个，更新 ${updateCount} 个视频`,
       data: {
         totalVodVideos: vodVideos.length,
-        existingVideos: existingVideoIds.length,
         newVideosAdded: successCount,
-        failedVideos: newVideos.length - successCount,
+        deletedVideos: deleteCount,
+        updatedVideos: updateCount,
         syncResults: syncResults
       }
     });
-    
   } catch (error) {
     console.error('❌ VOD同步失败:', error);
     res.status(500).json({
