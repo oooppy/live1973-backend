@@ -48,8 +48,11 @@ app.set('trust proxy', true);
 // 添加静态文件服务
 app.use('/videos', express.static(path.join(__dirname, 'videos')));
 
-// 🆕 Flutter Web 静态文件服务
-app.use('/', express.static(path.join(__dirname, 'public')));
+// 🆕 React 前端静态文件服务
+app.use('/', express.static(path.join(__dirname, 'react-build')));
+
+// 🆕 Flutter Web 静态文件服务（保留作为备用）
+app.use('/flutter', express.static(path.join(__dirname, 'public')));
 
 // 数据库连接配置
 const dbConfig = {
@@ -99,7 +102,30 @@ app.get('/api/videos', async (req, res) => {
       'SELECT * FROM videos WHERE status = ? ORDER BY created_at DESC',
       ['active']
     );
-    res.json(rows);
+    
+    // 为有阿里云视频ID的视频获取播放URL
+    const videosWithUrls = await Promise.all(
+      rows.map(async (video) => {
+        if (video.aliyun_video_id) {
+          try {
+            console.log(`🎬 为视频 ${video.id} 获取播放URL: ${video.aliyun_video_id}`);
+            const playUrlResult = await vodService.getPlayUrl(video.aliyun_video_id);
+            
+            if (playUrlResult.success) {
+              video.video_url = playUrlResult.playUrl;
+              console.log(`✅ 成功获取播放URL: ${playUrlResult.playUrl.substring(0, 50)}...`);
+            } else {
+              console.log(`⚠️  获取播放URL失败: ${playUrlResult.error}`);
+            }
+          } catch (vodError) {
+            console.error(`❌ VOD服务错误: ${vodError.message}`);
+          }
+        }
+        return video;
+      })
+    );
+    
+    res.json(videosWithUrls);
   } catch (error) {
     console.error('获取视频列表失败:', error);
     res.status(500).json({ error: '获取视频列表失败' });
@@ -118,7 +144,28 @@ app.get('/api/videos/:id', async (req, res) => {
       return res.status(404).json({ error: '视频不存在' });
     }
     
-    res.json(rows[0]);
+    const video = rows[0];
+    
+    // 如果有阿里云视频ID，尝试获取播放URL
+    if (video.aliyun_video_id) {
+      try {
+        console.log(`🎬 为视频 ${video.id} 获取播放URL: ${video.aliyun_video_id}`);
+        const playUrlResult = await vodService.getPlayUrl(video.aliyun_video_id);
+        
+        if (playUrlResult.success) {
+          video.video_url = playUrlResult.playUrl;
+          console.log(`✅ 成功获取播放URL: ${playUrlResult.playUrl.substring(0, 50)}...`);
+        } else {
+          console.log(`⚠️  获取播放URL失败: ${playUrlResult.error}`);
+          // 如果获取失败，保持原有的video_url（可能为空）
+        }
+      } catch (vodError) {
+        console.error(`❌ VOD服务错误: ${vodError.message}`);
+        // 继续使用原有的video_url
+      }
+    }
+    
+    res.json(video);
   } catch (error) {
     console.error('获取视频详情失败:', error);
     res.status(500).json({ error: '获取视频详情失败' });
@@ -573,15 +620,20 @@ app.options('*', (req, res) => {
   res.sendStatus(200);
 });
 
-// 🆕 SPA 路由支持（单页应用路由处理）
+// 🆕 SPA 路由支持（React路由处理）
 app.get('*', (req, res) => {
   // 如果是 API 请求，返回 404
   if (req.url.startsWith('/api')) {
     return res.status(404).json({ error: '接口不存在' });
   }
   
-  // 非 API 请求，返回 Flutter Web 应用的 index.html
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  // 如果是Flutter路径，返回Flutter应用
+  if (req.url.startsWith('/flutter')) {
+    return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  }
+  
+  // 其他请求，返回 React 应用的 index.html
+  res.sendFile(path.join(__dirname, 'react-build', 'index.html'));
 });
 
 // 其他请求的 404 处理（主要处理非 GET 请求）
@@ -636,11 +688,12 @@ async function startServers() {
   
   // 启动 HTTP 服务器（主要服务）
   const httpServer = http.createServer(app);
-  httpServer.listen(HTTP_PORT, () => {
+  httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
     console.log(`🚀 HTTP 服务器运行在端口 ${HTTP_PORT}`);
     console.log(`📱 健康检查: http://localhost:${HTTP_PORT}/api/health`);
     console.log(`🎬 视频接口: http://localhost:${HTTP_PORT}/api/videos`);
     console.log(`🌐 前端应用: http://localhost:${HTTP_PORT}/`);
+    console.log(`📱 手机访问: http://192.168.1.3:${HTTP_PORT}/`);
   });
 
   // 可选：启动直接 HTTPS 服务器（用于测试）
@@ -649,7 +702,7 @@ async function startServers() {
     if (httpsOptions) {
       try {
         const httpsServer = https.createServer(httpsOptions, app);
-        httpsServer.listen(HTTPS_PORT, () => {
+        httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => {
           console.log(`🔒 HTTPS 服务器运行在端口 ${HTTPS_PORT} (测试用)`);
           console.log(`🔐 HTTPS 健康检查: https://localhost:${HTTPS_PORT}/api/health`);
         });
