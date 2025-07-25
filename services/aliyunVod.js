@@ -97,16 +97,28 @@ class AliyunVodService {
       console.log(`📄 当前页: ${result.MediaList ? result.MediaList.length : 0} 个视频`);
 
       if (result.MediaList && result.MediaList.length > 0) {
-        const videos = result.MediaList.map(media => ({
-          VideoId: media.MediaId,
-          Title: media.Title || '未命名视频',
-          Description: media.Description || '',
-          Duration: media.Duration || 0,
-          CoverURL: media.CoverURL || '',
-          Status: media.Status,
-          CreationTime: media.CreationTime,
-          Size: media.Size || 0
-        }));
+        console.log('🔍 原始VOD API响应示例:');
+        console.log(JSON.stringify(result.MediaList[0], null, 2));
+        
+        const videos = result.MediaList.map(media => {
+          const video = {
+            VideoId: media.MediaId,
+            Title: media.Title || '未命名视频',
+            Description: media.Description || '',
+            Duration: media.Duration || 0,
+            CoverURL: media.CoverURL || '',
+            Status: media.Status,
+            CreationTime: media.CreationTime,
+            Size: media.Size || 0
+          };
+          
+          console.log(`📹 处理视频: ${video.Title} (${video.VideoId})`);
+          console.log(`   - 标题: ${video.Title}`);
+          console.log(`   - 时长: ${video.Duration}秒`);
+          console.log(`   - 缩略图: ${video.CoverURL ? '有' : '无'}`);
+          
+          return video;
+        });
         
         console.log(`✅ 获取视频列表成功: ${videos.length} 个视频`);
         videos.forEach((video, index) => {
@@ -302,22 +314,22 @@ class AliyunVodService {
       const params = { VideoId: videoId };
       const result = await this.client.request('GetVideoInfo', params, { method: 'POST' });
 
+      console.log('🔍 GetVideoInfo API响应:');
+      console.log(JSON.stringify(result, null, 2));
+
       if (result.Video) {
         const video = result.Video;
         console.log(`✅ 获取视频信息成功: ${video.Title}`);
         
         return {
           success: true,
-          videoInfo: {
-            videoId: video.VideoId,
-            title: video.Title,
-            description: video.Description,
-            duration: video.Duration,
-            coverUrl: video.CoverURL,
-            status: video.Status,
-            creationTime: video.CreationTime,
-            size: video.Size
-          }
+          title: video.Title,
+          description: video.Description,
+          duration: video.Duration,
+          coverUrl: video.CoverURL,
+          status: video.Status,
+          creationTime: video.CreationTime,
+          size: video.Size
         };
       } else {
         throw new Error('未获取到视频信息');

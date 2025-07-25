@@ -472,16 +472,35 @@ app.post('/api/videos/sync-vod', async (req, res) => {
     const syncResults = [];
     for (const vodVideo of newVideos) {
       try {
+        // 🆕 获取单个视频的详细信息
+        console.log(`🔍 获取视频详细信息: ${vodVideo.VideoId}`);
+        const videoInfo = await vodService.getVideoInfo(vodVideo.VideoId);
+        
+        let title = '未命名视频';
+        let description = '';
+        let duration = '0:00';
+        let thumbnailUrl = '';
+        
+        if (videoInfo.success) {
+          title = videoInfo.title || '未命名视频';
+          description = videoInfo.description || '';
+          duration = formatDurationFromSeconds(videoInfo.duration || 0);
+          thumbnailUrl = videoInfo.coverUrl || '';
+          console.log(`✅ 获取到视频信息: ${title} (${duration})`);
+        } else {
+          console.log(`⚠️  获取视频信息失败: ${videoInfo.error}`);
+        }
+        
         const [result] = await pool.execute(
           `INSERT INTO videos (
             title, description, aliyun_video_id, duration, thumbnail_url, video_url, status, view_count, created_at, updated_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
           [
-            vodVideo.Title || '未命名视频',
-            vodVideo.Description || '',
+            title,
+            description,
             vodVideo.VideoId,
-            formatDurationFromSeconds(vodVideo.Duration),
-            vodVideo.CoverURL || '',
+            duration,
+            thumbnailUrl,
             '',
             'active',
             0
@@ -522,31 +541,58 @@ app.post('/api/videos/sync-vod', async (req, res) => {
         });
       }
     }
-    // 7. 可选：同步更新已有视频的标题、描述等（如有需要）
+    // 7. 同步更新已有视频的标题、描述、缩略图、时长等
     for (const vodVideo of vodVideos) {
       const dbVideo = existingVideos.find(v => v.aliyun_video_id === vodVideo.VideoId);
       if (dbVideo) {
         try {
+          // 🆕 获取单个视频的详细信息
+          console.log(`🔍 获取视频详细信息: ${vodVideo.VideoId}`);
+          const videoInfo = await vodService.getVideoInfo(vodVideo.VideoId);
+          
+          let title = '未命名视频';
+          let description = '';
+          let duration = '0:00';
+          let thumbnailUrl = '';
+          
+          if (videoInfo.success) {
+            title = videoInfo.title || '未命名视频';
+            description = videoInfo.description || '';
+            duration = formatDurationFromSeconds(videoInfo.duration || 0);
+            thumbnailUrl = videoInfo.coverUrl || '';
+            console.log(`✅ 获取到视频信息: ${title} (${duration})`);
+          } else {
+            console.log(`⚠️  获取视频信息失败: ${videoInfo.error}`);
+          }
+          
+          console.log(`🔄 更新视频信息: ${title} (${vodVideo.VideoId})`);
+          console.log(`   - 标题: ${title}`);
+          console.log(`   - 时长: ${duration}`);
+          console.log(`   - 缩略图: ${thumbnailUrl ? '有' : '无'}`);
+          
           await pool.execute(
             'UPDATE videos SET title = ?, description = ?, duration = ?, thumbnail_url = ?, updated_at = NOW() WHERE id = ?',
             [
-              vodVideo.Title || '未命名视频',
-              vodVideo.Description || '',
-              formatDurationFromSeconds(vodVideo.Duration),
-              vodVideo.CoverURL || '',
+              title,
+              description,
+              duration,
+              thumbnailUrl,
               dbVideo.id
             ]
           );
           syncResults.push({
             databaseId: dbVideo.id,
             videoId: vodVideo.VideoId,
+            title: vodVideo.Title,
             status: 'updated'
           });
           updateCount++;
         } catch (error) {
+          console.error(`❌ 更新视频失败: ${vodVideo.VideoId}`, error.message);
           syncResults.push({
             databaseId: dbVideo.id,
             videoId: vodVideo.VideoId,
+            title: vodVideo.Title,
             status: 'update_error',
             error: error.message
           });
