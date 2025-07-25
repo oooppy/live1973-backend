@@ -583,7 +583,7 @@ app.post('/api/videos/sync-vod', async (req, res) => {
           syncResults.push({
             databaseId: dbVideo.id,
             videoId: vodVideo.VideoId,
-            title: vodVideo.Title,
+            title: title,
             status: 'updated'
           });
           updateCount++;
@@ -592,7 +592,7 @@ app.post('/api/videos/sync-vod', async (req, res) => {
           syncResults.push({
             databaseId: dbVideo.id,
             videoId: vodVideo.VideoId,
-            title: vodVideo.Title,
+            title: title,
             status: 'update_error',
             error: error.message
           });
