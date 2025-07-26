@@ -102,14 +102,14 @@ class AliyunVodService {
         
         const videos = result.MediaList.map(media => {
           const video = {
-            VideoId: media.MediaId,
-            Title: media.Title || '未命名视频',
-            Description: media.Description || '',
-            Duration: media.Duration || 0,
-            CoverURL: media.CoverURL || '',
-            Status: media.Status,
-            CreationTime: media.CreationTime,
-            Size: media.Size || 0
+          VideoId: media.MediaId,
+          Title: media.Title || '未命名视频',
+          Description: media.Description || '',
+          Duration: media.Duration || 0,
+          CoverURL: media.CoverURL || '',
+          Status: media.Status,
+          CreationTime: media.CreationTime,
+          Size: media.Size || 0
           };
           
           console.log(`📹 处理视频: ${video.Title} (${video.VideoId})`);
@@ -323,13 +323,13 @@ class AliyunVodService {
         
         return {
           success: true,
-          title: video.Title,
-          description: video.Description,
-          duration: video.Duration,
-          coverUrl: video.CoverURL,
-          status: video.Status,
-          creationTime: video.CreationTime,
-          size: video.Size
+            title: video.Title,
+            description: video.Description,
+            duration: video.Duration,
+            coverUrl: video.CoverURL,
+            status: video.Status,
+            creationTime: video.CreationTime,
+            size: video.Size
         };
       } else {
         throw new Error('未获取到视频信息');

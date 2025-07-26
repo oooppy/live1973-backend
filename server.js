@@ -8,6 +8,26 @@ const http = require('http');
 const fs = require('fs');
 require('dotenv').config();
 
+// URL缓存机制
+const urlCache = new Map();
+const CACHE_DURATION = 30 * 60 * 1000; // 30分钟缓存
+
+// 缓存管理函数
+function getCachedUrl(key) {
+  const cached = urlCache.get(key);
+  if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+    return cached.url;
+  }
+  return null;
+}
+
+function setCachedUrl(key, url) {
+  urlCache.set(key, {
+    url: url,
+    timestamp: Date.now()
+  });
+}
+
 const app = express();
 const HTTP_PORT = process.env.PORT || 3000;
 const HTTPS_PORT = process.env.HTTPS_PORT || 3443;
@@ -103,24 +123,52 @@ app.get('/api/videos', async (req, res) => {
       ['active']
     );
     
-    // 为有阿里云视频ID的视频获取播放URL
+    // 为有阿里云视频ID的视频获取播放URL和缩略图URL（使用缓存优化）
     const videosWithUrls = await Promise.all(
       rows.map(async (video) => {
         if (video.aliyun_video_id) {
           try {
-            console.log(`🎬 为视频 ${video.id} 获取播放URL: ${video.aliyun_video_id}`);
-            const playUrlResult = await vodService.getPlayUrl(video.aliyun_video_id);
+            console.log(`🎬 为视频 ${video.id} 获取URL: ${video.aliyun_video_id}`);
             
+            // 播放URL：总是实时获取（因为只有1小时有效期）
+            const playUrlResult = await vodService.getPlayUrl(video.aliyun_video_id);
             if (playUrlResult.success) {
               video.video_url = playUrlResult.playUrl;
               console.log(`✅ 成功获取播放URL: ${playUrlResult.playUrl.substring(0, 50)}...`);
             } else {
               console.log(`⚠️  获取播放URL失败: ${playUrlResult.error}`);
             }
+            
+            // 缩略图URL：使用缓存机制
+            const thumbnailCacheKey = `thumbnail_${video.aliyun_video_id}`;
+            let thumbnailUrl = getCachedUrl(thumbnailCacheKey);
+            
+            if (!thumbnailUrl) {
+              // 缓存中没有，从VOD获取
+              const videoInfoResult = await vodService.getVideoInfo(video.aliyun_video_id);
+              if (videoInfoResult.success && videoInfoResult.coverUrl) {
+                thumbnailUrl = videoInfoResult.coverUrl;
+                setCachedUrl(thumbnailCacheKey, thumbnailUrl);
+                console.log(`✅ 从VOD获取并缓存缩略图URL: ${thumbnailUrl.substring(0, 50)}...`);
+              } else {
+                console.log(`⚠️  获取缩略图URL失败: ${videoInfoResult.error || '无缩略图'}`);
+                thumbnailUrl = video.thumbnail_url; // 使用数据库中的备用URL
+              }
+            } else {
+              console.log(`✅ 使用缓存的缩略图URL: ${thumbnailUrl.substring(0, 50)}...`);
+            }
+            
+            video.thumbnail_url = thumbnailUrl;
           } catch (vodError) {
             console.error(`❌ VOD服务错误: ${vodError.message}`);
           }
         }
+        
+        // 格式化时长
+        if (video.duration) {
+          video.duration = formatDurationFromSeconds(video.duration);
+        }
+        
         return video;
       })
     );
@@ -146,26 +194,39 @@ app.get('/api/videos/:id', async (req, res) => {
     
     const video = rows[0];
     
-    // 如果有阿里云视频ID，尝试获取播放URL
+    // 如果有阿里云视频ID，尝试获取播放URL和缩略图URL
     if (video.aliyun_video_id) {
       try {
-        console.log(`🎬 为视频 ${video.id} 获取播放URL: ${video.aliyun_video_id}`);
-        const playUrlResult = await vodService.getPlayUrl(video.aliyun_video_id);
+        console.log(`🎬 为视频 ${video.id} 获取播放URL和缩略图: ${video.aliyun_video_id}`);
         
+        // 获取播放URL
+        const playUrlResult = await vodService.getPlayUrl(video.aliyun_video_id);
         if (playUrlResult.success) {
           video.video_url = playUrlResult.playUrl;
           console.log(`✅ 成功获取播放URL: ${playUrlResult.playUrl.substring(0, 50)}...`);
         } else {
           console.log(`⚠️  获取播放URL失败: ${playUrlResult.error}`);
-          // 如果获取失败，保持原有的video_url（可能为空）
         }
-      } catch (vodError) {
-        console.error(`❌ VOD服务错误: ${vodError.message}`);
-        // 继续使用原有的video_url
+        
+        // 获取视频信息（包含缩略图URL）
+        const videoInfoResult = await vodService.getVideoInfo(video.aliyun_video_id);
+        if (videoInfoResult.success && videoInfoResult.coverUrl) {
+          video.thumbnail_url = videoInfoResult.coverUrl;
+          console.log(`✅ 成功获取缩略图URL: ${videoInfoResult.coverUrl.substring(0, 50)}...`);
+        } else {
+          console.log(`⚠️  获取缩略图URL失败: ${videoInfoResult.error || '无缩略图'}`);
+        }
+              } catch (vodError) {
+          console.error(`❌ VOD服务错误: ${vodError.message}`);
+        }
       }
-    }
-    
-    res.json(video);
+      
+      // 格式化时长
+      if (video.duration) {
+        video.duration = formatDurationFromSeconds(video.duration);
+      }
+      
+      res.json(video);
   } catch (error) {
     console.error('获取视频详情失败:', error);
     res.status(500).json({ error: '获取视频详情失败' });
@@ -484,9 +545,25 @@ app.post('/api/videos/sync-vod', async (req, res) => {
         if (videoInfo.success) {
           title = videoInfo.title || '未命名视频';
           description = videoInfo.description || '';
-          duration = formatDurationFromSeconds(videoInfo.duration || 0);
+          
+          // 调试VOD API返回的原始时长数据
+          console.log(`🔍 VOD原始时长数据: ${vodVideo.VideoId}`);
+          console.log(`   - 原始duration: ${videoInfo.duration}`);
+          console.log(`   - duration类型: ${typeof videoInfo.duration}`);
+          
+          // 🆕 修复：将VOD API返回的duration字符串转换为秒数
+          let durationInSeconds = 0;
+          if (videoInfo.duration) {
+            durationInSeconds = parseFloat(videoInfo.duration);
+            console.log(`   - 转换为秒数: ${durationInSeconds}`);
+          }
+          
+          console.log(`   - 格式化后: ${formatDurationFromSeconds(durationInSeconds)}`);
+          
+          // 🆕 存储秒数到数据库，而不是格式化后的字符串
+          duration = durationInSeconds;
           thumbnailUrl = videoInfo.coverUrl || '';
-          console.log(`✅ 获取到视频信息: ${title} (${duration})`);
+          console.log(`✅ 获取到视频信息: ${title} (${durationInSeconds}秒)`);
         } else {
           console.log(`⚠️  获取视频信息失败: ${videoInfo.error}`);
         }
@@ -558,9 +635,25 @@ app.post('/api/videos/sync-vod', async (req, res) => {
           if (videoInfo.success) {
             title = videoInfo.title || '未命名视频';
             description = videoInfo.description || '';
-            duration = formatDurationFromSeconds(videoInfo.duration || 0);
+            
+            // 调试VOD API返回的原始时长数据
+            console.log(`🔍 VOD原始时长数据: ${vodVideo.VideoId}`);
+            console.log(`   - 原始duration: ${videoInfo.duration}`);
+            console.log(`   - duration类型: ${typeof videoInfo.duration}`);
+            
+            // 🆕 修复：将VOD API返回的duration字符串转换为秒数
+            let durationInSeconds = 0;
+            if (videoInfo.duration) {
+              durationInSeconds = parseFloat(videoInfo.duration);
+              console.log(`   - 转换为秒数: ${durationInSeconds}`);
+            }
+            
+            console.log(`   - 格式化后: ${formatDurationFromSeconds(durationInSeconds)}`);
+            
+            // 🆕 存储秒数到数据库，而不是格式化后的字符串
+            duration = durationInSeconds;
             thumbnailUrl = videoInfo.coverUrl || '';
-            console.log(`✅ 获取到视频信息: ${title} (${duration})`);
+            console.log(`✅ 获取到视频信息: ${title} (${durationInSeconds}秒)`);
           } else {
             console.log(`⚠️  获取视频信息失败: ${videoInfo.error}`);
           }
