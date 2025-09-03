@@ -414,6 +414,14 @@ app.get('/api/videos/:id/play', async (req, res) => {
     const clientProtocol = req.secure || req.get('X-Forwarded-Proto') === 'https' ? 'HTTPS' : 'HTTP';
     console.log(`🎬 请求播放视频: ${videoId} (${clientProtocol})`);
     
+    // 🆕 检查缓存
+    const cacheKey = `play_${videoId}`;
+    const cachedUrl = getCachedUrl(cacheKey);
+    if (cachedUrl) {
+      console.log(`📦 使用缓存的播放地址: ${videoId}`);
+      return res.json(cachedUrl);
+    }
+    
     const [rows] = await pool.execute(
       'SELECT * FROM videos WHERE id = ? AND status = ?',
       [videoId, 'active']
@@ -431,6 +439,21 @@ app.get('/api/videos/:id/play', async (req, res) => {
       const result = await vodService.getPlayUrl(video.aliyun_video_id);
       
       if (result.success) {
+        // 🆕 缓存播放地址（30分钟）
+        const responseData = {
+          success: true,
+          data: {
+            id: video.id,
+            title: video.title,
+            playUrl: result.playUrl,
+            definition: result.definition,
+            format: result.format,
+            source: 'vod_sdk'
+          }
+        };
+        
+        setCachedUrl(cacheKey, responseData);
+        
         try {
           await pool.execute(
             'UPDATE videos SET video_url = ?, updated_at = NOW() WHERE id = ?',
@@ -441,17 +464,7 @@ app.get('/api/videos/:id/play', async (req, res) => {
           console.log('⚠️  更新缓存失败，但不影响播放:', updateError.message);
         }
         
-        return res.json({
-          success: true,
-          data: {
-            id: video.id,
-            title: video.title,
-            playUrl: result.playUrl,
-            definition: result.definition,
-            format: result.format,
-            source: 'vod_sdk'
-          }
-        });
+        return res.json(responseData);
       } else {
         return res.status(500).json({
           error: 'VOD播放地址获取失败',
@@ -460,7 +473,7 @@ app.get('/api/videos/:id/play', async (req, res) => {
       }
     } else if (video.video_url) {
       console.log(`▶️  普通视频，直接播放: ${video.video_url}`);
-      return res.json({
+      const responseData = {
         success: true,
         data: {
           id: video.id,
@@ -468,7 +481,12 @@ app.get('/api/videos/:id/play', async (req, res) => {
           playUrl: video.video_url,
           source: 'direct'
         }
-      });
+      };
+      
+      // 🆕 缓存普通视频播放地址（1小时）
+      setCachedUrl(cacheKey, responseData);
+      
+      return res.json(responseData);
     } else {
       return res.status(400).json({ 
         error: '视频缺少播放地址' 
@@ -496,6 +514,61 @@ app.get('/api/vod/info/:videoId', async (req, res) => {
     const result = await vodService.getVideoInfo(req.params.videoId);
     res.json(result);
   } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 🆕 播放事件记录接口
+app.post('/api/videos/play-events', async (req, res) => {
+  try {
+    const { videoId, eventType, timestamp, ...data } = req.body;
+    
+    // 记录播放事件到数据库（可选）
+    await pool.execute(
+      `INSERT INTO play_events (video_id, event_type, event_data, created_at) 
+       VALUES (?, ?, ?, ?)`,
+      [videoId, eventType, JSON.stringify(data), timestamp || new Date()]
+    );
+    
+    console.log(`📊 记录播放事件: ${videoId} - ${eventType}`);
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('记录播放事件失败:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 🆕 获取播放性能统计
+app.get('/api/videos/:id/stats', async (req, res) => {
+  try {
+    const videoId = req.params.id;
+    
+    // 获取播放统计信息
+    const [stats] = await pool.execute(
+      `SELECT 
+        COUNT(*) as total_plays,
+        COUNT(CASE WHEN event_type = 'start' THEN 1 END) as starts,
+        COUNT(CASE WHEN event_type = 'complete' THEN 1 END) as completes,
+        COUNT(CASE WHEN event_type = 'error' THEN 1 END) as errors,
+        AVG(CASE WHEN event_type = 'seek' THEN JSON_EXTRACT(event_data, '$.seekTime') END) as avg_seek_time
+       FROM play_events 
+       WHERE video_id = ?`,
+      [videoId]
+    );
+    
+    res.json({
+      success: true,
+      data: stats[0] || {
+        total_plays: 0,
+        starts: 0,
+        completes: 0,
+        errors: 0,
+        avg_seek_time: 0
+      }
+    });
+  } catch (error) {
+    console.error('获取播放统计失败:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });

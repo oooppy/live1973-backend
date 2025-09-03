@@ -236,9 +236,10 @@ class AliyunVodService {
       
       console.log(`🎬 获取VOD播放地址: ${videoId}`);
       
+      // 🆕 支持HLS格式，提升播放流畅度
       const params = {
         VideoId: videoId,
-        Formats: 'mp4',
+        Formats: 'mp4,m3u8', // 优先获取HLS格式
         AuthTimeout: 3600, // 1小时有效期
         Definition: 'Auto' // 自动选择最佳清晰度
       };
@@ -254,8 +255,12 @@ class AliyunVodService {
       console.log(JSON.stringify(result, null, 2));
 
       if (result.PlayInfoList && result.PlayInfoList.PlayInfo && result.PlayInfoList.PlayInfo.length > 0) {
-        // 获取第一个播放信息（通常是最高质量的）
-        const playInfo = result.PlayInfoList.PlayInfo[0];
+        // 🆕 优先选择HLS格式，如果没有则使用MP4
+        const playInfoList = result.PlayInfoList.PlayInfo;
+        const hlsPlayInfo = playInfoList.find(info => info.Format === 'm3u8');
+        const mp4PlayInfo = playInfoList.find(info => info.Format === 'mp4');
+        
+        const playInfo = hlsPlayInfo || mp4PlayInfo || playInfoList[0];
         
         console.log(`✅ 获取播放地址成功:`);
         console.log(`   播放URL: ${playInfo.PlayURL}`);
