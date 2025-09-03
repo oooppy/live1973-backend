@@ -1,6 +1,7 @@
 {
-  "short_name": "React App",
-  "name": "Create React App Sample",
+  "short_name": "Live1973",
+  "name": "Live1973 - 尽享现场音乐",
+  "description": "Live1973 - 尽享现场音乐，为您提供高质量的音乐视频内容",
   "icons": [
     {
       "src": "favicon.ico",
@@ -21,5 +22,8 @@
   "start_url": ".",
   "display": "standalone",
   "theme_color": "#000000",
-  "background_color": "#ffffff"
+  "background_color": "#000000",
+  "orientation": "portrait",
+  "categories": ["music", "entertainment"],
+  "lang": "zh-CN"
 }
