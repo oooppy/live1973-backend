@@ -3,6 +3,7 @@ const mysql = require('mysql2/promise');
 const cors = require('cors');
 const path = require('path');
 const vodService = require('./services/aliyunVod');
+const { toCdnSignedUrlFromOrigin, generateSignedUrlForPath, config: cdnConfig } = require('./services/cdnUrl');
 const https = require('https');
 const http = require('http');
 const fs = require('fs');
@@ -35,6 +36,13 @@ const HTTPS_PORT = process.env.HTTPS_PORT || 3443;
 // 🆕 检测运行环境
 const isProduction = process.env.NODE_ENV === 'production';
 const enableDirectHTTPS = process.env.ENABLE_DIRECT_HTTPS === 'true';
+const preferCDN = process.env.PREFER_CDN_OVER_VOD === 'true';
+
+// 🧪 打印与CDN相关的环境变量，便于确认是否生效
+console.log('[ENV] PREFER_CDN_OVER_VOD =', process.env.PREFER_CDN_OVER_VOD);
+console.log('[ENV] CDN_ENABLED =', process.env.CDN_ENABLED);
+console.log('[ENV] CDN_AUTH_ENABLED =', process.env.CDN_AUTH_ENABLED);
+console.log('[ENV] CDN_DOMAIN =', process.env.CDN_DOMAIN);
 
 // 简单的环境变量检查
 function checkEnvVars() {
@@ -126,7 +134,11 @@ app.get('/api/videos', async (req, res) => {
     // 为有阿里云视频ID的视频获取播放URL和缩略图URL（使用缓存优化）
     const videosWithUrls = await Promise.all(
       rows.map(async (video) => {
-        if (video.aliyun_video_id) {
+        if (preferCDN && cdnConfig.enabled && video.video_url) {
+          // 优先走CDN：将数据库中的原始URL(或对象路径)转换为CDN签名URL
+          video.video_url = toCdnSignedUrlFromOrigin(video.video_url);
+          console.log(`✅ 使用CDN播放URL: ${video.video_url.substring(0, 60)}...`);
+        } else if (video.aliyun_video_id) {
           try {
             console.log(`🎬 为视频 ${video.id} 获取URL: ${video.aliyun_video_id}`);
             
@@ -147,12 +159,14 @@ app.get('/api/videos', async (req, res) => {
               // 缓存中没有，从VOD获取
               const videoInfoResult = await vodService.getVideoInfo(video.aliyun_video_id);
               if (videoInfoResult.success && videoInfoResult.coverUrl) {
-                thumbnailUrl = videoInfoResult.coverUrl;
+                // 统一缩略图走CDN：如果是VOD/OSS完整URL，替换为CDN域名（并按需签名）
+                thumbnailUrl = toCdnSignedUrlFromOrigin(videoInfoResult.coverUrl);
                 setCachedUrl(thumbnailCacheKey, thumbnailUrl);
                 console.log(`✅ 从VOD获取并缓存缩略图URL: ${thumbnailUrl.substring(0, 50)}...`);
               } else {
                 console.log(`⚠️  获取缩略图URL失败: ${videoInfoResult.error || '无缩略图'}`);
-                thumbnailUrl = video.thumbnail_url; // 使用数据库中的备用URL
+                // 使用数据库中的备用URL，但也统一转换为CDN
+                thumbnailUrl = toCdnSignedUrlFromOrigin(video.thumbnail_url || '');
               }
             } else {
               console.log(`✅ 使用缓存的缩略图URL: ${thumbnailUrl.substring(0, 50)}...`);
@@ -167,6 +181,10 @@ app.get('/api/videos', async (req, res) => {
         // 格式化时长
         if (video.duration) {
           video.duration = formatDurationFromSeconds(video.duration);
+        }
+        // 最终兜底：无论来源如何，统一将缩略图规范为CDN
+        if (video.thumbnail_url) {
+          video.thumbnail_url = toCdnSignedUrlFromOrigin(video.thumbnail_url);
         }
         
         return video;
@@ -195,7 +213,11 @@ app.get('/api/videos/:id', async (req, res) => {
     const video = rows[0];
     
     // 如果有阿里云视频ID，尝试获取播放URL和缩略图URL
-    if (video.aliyun_video_id) {
+    if (preferCDN && cdnConfig.enabled && video.video_url) {
+      // 优先走CDN：将原始URL/对象路径转换为CDN签名URL
+      video.video_url = toCdnSignedUrlFromOrigin(video.video_url);
+      console.log(`✅ 使用CDN播放URL: ${video.video_url.substring(0, 60)}...`);
+    } else if (video.aliyun_video_id) {
       try {
         console.log(`🎬 为视频 ${video.id} 获取播放URL和缩略图: ${video.aliyun_video_id}`);
         
@@ -211,10 +233,15 @@ app.get('/api/videos/:id', async (req, res) => {
         // 获取视频信息（包含缩略图URL）
         const videoInfoResult = await vodService.getVideoInfo(video.aliyun_video_id);
         if (videoInfoResult.success && videoInfoResult.coverUrl) {
-          video.thumbnail_url = videoInfoResult.coverUrl;
+          // 统一缩略图走CDN
+          video.thumbnail_url = toCdnSignedUrlFromOrigin(videoInfoResult.coverUrl);
           console.log(`✅ 成功获取缩略图URL: ${videoInfoResult.coverUrl.substring(0, 50)}...`);
         } else {
           console.log(`⚠️  获取缩略图URL失败: ${videoInfoResult.error || '无缩略图'}`);
+          // 回退为数据库中已存的缩略图，但统一转换为CDN
+          if (video.thumbnail_url) {
+            video.thumbnail_url = toCdnSignedUrlFromOrigin(video.thumbnail_url);
+          }
         }
               } catch (vodError) {
           console.error(`❌ VOD服务错误: ${vodError.message}`);
@@ -224,6 +251,10 @@ app.get('/api/videos/:id', async (req, res) => {
       // 格式化时长
       if (video.duration) {
         video.duration = formatDurationFromSeconds(video.duration);
+      }
+      // 最终兜底：统一将缩略图规范为CDN
+      if (video.thumbnail_url) {
+        video.thumbnail_url = toCdnSignedUrlFromOrigin(video.thumbnail_url);
       }
       
       res.json(video);
@@ -433,37 +464,43 @@ app.get('/api/videos/:id/play', async (req, res) => {
     
     const video = rows[0];
     
-    if (video.aliyun_video_id) {
+    // 优先走CDN（如果已配置且该视频存在可用的原始URL/对象路径）
+    if (preferCDN && cdnConfig.enabled && video.video_url) {
+      const cdnPlay = toCdnSignedUrlFromOrigin(video.video_url);
+      const responseData = {
+        success: true,
+        data: {
+          id: video.id,
+          title: video.title,
+          playUrl: cdnPlay,
+          source: 'cdn'
+        }
+      };
+      setCachedUrl(cacheKey, responseData);
+      return res.json(responseData);
+    } else if (video.aliyun_video_id) {
       console.log(`🎯 VOD视频，使用SDK获取播放地址: ${video.aliyun_video_id}`);
       
       const result = await vodService.getPlayUrl(video.aliyun_video_id);
       
       if (result.success) {
-        // 🆕 缓存播放地址（30分钟）
+        // 🆕 统一将 VOD 播放URL 转为 CDN（若启用CDN）；不再写回数据库
+        const finalPlayUrl = cdnConfig.enabled ? toCdnSignedUrlFromOrigin(result.playUrl) : result.playUrl;
         const responseData = {
           success: true,
           data: {
             id: video.id,
             title: video.title,
-            playUrl: result.playUrl,
+            playUrl: finalPlayUrl,
             definition: result.definition,
             format: result.format,
-            source: 'vod_sdk'
+            source: cdnConfig.enabled ? 'cdn' : 'vod_sdk'
           }
         };
-        
+
+        // 🆕 缓存播放地址（30分钟）
         setCachedUrl(cacheKey, responseData);
-        
-        try {
-          await pool.execute(
-            'UPDATE videos SET video_url = ?, updated_at = NOW() WHERE id = ?',
-            [result.playUrl, videoId]
-          );
-          console.log('📝 已更新数据库中的播放地址缓存');
-        } catch (updateError) {
-          console.log('⚠️  更新缓存失败，但不影响播放:', updateError.message);
-        }
-        
+
         return res.json(responseData);
       } else {
         return res.status(500).json({
@@ -496,6 +533,24 @@ app.get('/api/videos/:id/play', async (req, res) => {
   } catch (error) {
     console.error('获取播放地址失败:', error);
     res.status(500).json({ error: '服务器内部错误' });
+  }
+});
+
+// CDN 签名预览接口：用于本地/线上快速验证签名是否正确
+app.get('/api/cdn/preview', (req, res) => {
+  try {
+    const { path: p, url } = req.query;
+    const input = url || p || '';
+    if (!input) {
+      return res.status(400).json({ success: false, error: '缺少 path 或 url 参数' });
+    }
+    if (!cdnConfig.enabled) {
+      return res.status(200).json({ success: true, message: 'CDN未启用', input, output: input });
+    }
+    const signed = toCdnSignedUrlFromOrigin(input);
+    res.json({ success: true, input, output: signed, authEnabled: cdnConfig.authEnabled, domain: cdnConfig.domain });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
   }
 });
 
@@ -612,7 +667,7 @@ app.post('/api/videos/sync-vod', async (req, res) => {
         
         let title = '未命名视频';
         let description = '';
-        let duration = '0:00';
+        let duration = 0;
         let thumbnailUrl = '';
         
         if (videoInfo.success) {
@@ -659,14 +714,14 @@ app.post('/api/videos/sync-vod', async (req, res) => {
         syncResults.push({
           databaseId: result.insertId,
           videoId: vodVideo.VideoId,
-          title: vodVideo.Title,
+          title: title,
           status: 'inserted'
         });
         successCount++;
       } catch (error) {
         syncResults.push({
           videoId: vodVideo.VideoId,
-          title: vodVideo.Title,
+          title: title,
           status: 'insert_error',
           error: error.message
         });
@@ -702,7 +757,7 @@ app.post('/api/videos/sync-vod', async (req, res) => {
           
           let title = '未命名视频';
           let description = '';
-          let duration = '0:00';
+          let duration = 0;
           let thumbnailUrl = '';
           
           if (videoInfo.success) {
