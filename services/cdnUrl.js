@@ -37,7 +37,8 @@ function normalizePath(pathOrUrl) {
 function buildCdnUrlFromPath(objectPath) {
   const path = normalizePath(objectPath);
   if (!path) return '';
-  const scheme = 'http'; // 使用 HTTP 协议，避免 HTTPS 证书问题
+  // 🆕 根据环境选择协议
+  const scheme = process.env.NODE_ENV === 'production' ? 'https' : 'http';
   return `${scheme}://${config.domain}${path}`;
 }
 
